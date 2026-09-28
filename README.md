@@ -198,6 +198,7 @@ run.
 | Target | Purpose |
 |---|---|
 | `movieplay` / `disc` | Codec player disc. |
+| `chain-part` | One clip of a multi-clip disc; used by `tools/build_chain.py`. |
 | `cdcbench` | Continuous and restarted CD-read measurement. |
 | `dmabench` | Maximum VRAM DMA per VBlank. |
 | `cpuvrambench` | CPU-to-VRAM data-port write throughput during VBlank. |
@@ -377,6 +378,31 @@ release body is English; the README inside each zip carries the same
 information in English and Japanese.
 [`harness/regions/README.md`](harness/regions/README.md) states what the
 verification proves and what it does not.
+
+## Multi-clip discs
+
+One disc can play several separately encoded clips back to back, for example a
+long movie cut at scene changes. Each clip has its own profile and its own
+source file, is simulated normally, and gets its own profile-specialized
+player, so the per-movie limits (frame count, palette switches, preloads)
+apply to each clip separately.
+
+```sh
+tools/python.sh --gpu tools/sim.py profiles/PART1.toml
+tools/python.sh --gpu tools/sim.py profiles/PART2.toml
+tools/python.sh tools/build_chain.py --name NAME --debug \
+  profiles/PART1.toml profiles/PART2.toml
+```
+
+`build_chain.py` builds each profile as clip `n` of `N` (`make chain-part`)
+and writes `out/NAME.iso` + `.cue` (`NAME_release` without `--debug`,
+`--region` selects the region as above). The disc holds `CLIPnnH.DAT`,
+`CLIPnnB.DAT`, and `CLIPnnP.DAT` for every clip; [`MOVIE.md`](MOVIE.md)
+describes the files. The console boots clip 1. At the end of each clip the
+player loads the next clip's player and startup data, so the screen shows the
+startup counter and the sound stops for a few seconds between clips; cutting
+at fades or scene changes hides this best. The final clip holds its last frame
+for 15 seconds and then wraps to clip 1.
 
 ## Recording
 
@@ -616,6 +642,7 @@ build intermediate、tmpfs leaseはrunごとに分離します。
 | Target | 用途 |
 |---|---|
 | `movieplay` / `disc` | Codec player disc。 |
+| `chain-part` | 複数clip discの1 clip。`tools/build_chain.py` が使います。 |
 | `cdcbench` | continuous/restarted CD read計測。 |
 | `dmabench` | VBlank当たり最大VRAM DMA。 |
 | `cpuvrambench` | VBlank中のCPU→VRAM data port書き込みthroughput実測。 |
@@ -789,6 +816,29 @@ zipを添付して、titleごとのsectionを書きます。既存のassetを置
 渡したときだけです。release本文は英語で、同じ内容の英日はzip内のREADMEにあります。
 検証が何を証明し、何を証明しないかは
 [`harness/regions/README.md`](harness/regions/README.md) にあります。
+
+## 複数clip disc
+
+1枚のdiscで、別々にencodeした複数のclipを続けて再生できます。例えば長い映画を
+scene changeで分割する場合です。各clipは専用のprofileとsource fileを持ち、通常どおり
+simulationされ、専用のprofile-specialized playerを持ちます。そのためframe数、
+palette switch数、preloadなどの映画単位の上限はclipごとに適用されます。
+
+```sh
+tools/python.sh --gpu tools/sim.py profiles/PART1.toml
+tools/python.sh --gpu tools/sim.py profiles/PART2.toml
+tools/python.sh tools/build_chain.py --name NAME --debug \
+  profiles/PART1.toml profiles/PART2.toml
+```
+
+`build_chain.py` は各profileを `N` 個中の `n` 番目のclipとしてbuildし
+(`make chain-part`)、`out/NAME.iso` + `.cue` を書きます(`--debug` なしでは
+`NAME_release`、regionは上と同じく `--region` で選びます)。discは全clipの
+`CLIPnnH.DAT`、`CLIPnnB.DAT`、`CLIPnnP.DAT` を持ちます。fileの内容は
+[`MOVIE.md`](MOVIE.md) にあります。本体はclip 1から起動します。各clipの終端で
+playerは次のclipのplayerとstartup dataを読み込むため、clipの間の数秒間は
+startup counterが表示され、音が止まります。fadeやscene changeで分割すると目立ちません。
+最後のclipは最終frameを15秒保持してからclip 1へ戻ります。
 
 ## Recording
 

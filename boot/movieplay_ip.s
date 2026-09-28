@@ -49,6 +49,11 @@
 .equ STAT_BOOT_STAGE, 0x8001		/* sidecar/Dic staging bank is available */
 .equ STAT_READY, 0x8003
 .equ STAT_END,   0x8004			/* SPからの映画終端通知(15秒待って再ループ) */
+/* Multi-clip chaining (CLIP_CHAIN builds only); see boot/movieplay_sp.s. */
+.equ CMD_CHAIN,  0x52
+.equ STAT_CHAIN, 0x8005
+.equ CHAIN_IP_BASE,  0x00FF0000		/* BIOS IP load address */
+.equ CHAIN_TRAMP_MD, 0x00FF9000		/* inside M-FREE 0xFF8880..0xFFB1FF */
 
 .equ MOVIE_NT,        0xE000
 .equ HUD_WINDOW_NT,   0xF000
@@ -586,6 +591,53 @@ play_loop:
 
 /* 映画終端: 最終フレームを表示したまま15秒(900vblank)待ち、先頭からループ再生 */
 movie_end_md:
+.ifdef CLIP_CHAIN
+	/* Only the final clip holds its last frame; every clip then loads the
+	   next clip's player, and the final clip wraps to clip 1. */
+.if CLIP_INDEX == CLIP_COUNT
+	move.w	#900-1, d2
+1:
+	bsr	wait_vblank
+	dbra	d2, 1b
+.endif
+	move.w	#CMD_CHAIN, (GA_COMCMD0).l
+1:
+	cmp.w	#STAT_CHAIN, (GA_COMSTAT0).l
+	bne.s	1b
+	/* Main now owns the bank holding the next player file. The copy loop
+	   must run outside the IP image it replaces. */
+	lea	md_chain_tramp, a0
+	lea	(CHAIN_TRAMP_MD).l, a1
+	move.w	#(md_chain_tramp_end-md_chain_tramp)/2-1, d0
+1:
+	move.w	(a0)+, (a1)+
+	dbra	d0, 1b
+	jmp	(CHAIN_TRAMP_MD).l
+
+/* Position-independent: copied to CHAIN_TRAMP_MD. The player file header at
+   the bank start gives the Main image offset/size and its ip_entry offset.
+   Clearing CMD_CHAIN tells Sub that Main no longer reads the bank. */
+md_chain_tramp:
+	move.w	#0x2700, sr
+	lea	(PROBE_BANK).l, a0
+	move.l	20(a0), d0
+	lea	(a0,d0.l), a1
+	move.l	24(a0), d1
+	addq.l	#3, d1
+	lsr.l	#2, d1
+	subq.w	#1, d1
+	lea	(CHAIN_IP_BASE).l, a2
+1:
+	move.l	(a1)+, (a2)+
+	dbra	d1, 1b
+	move.l	28(a0), d0
+	lea	(CHAIN_IP_BASE).l, a2
+	adda.l	d0, a2
+	move.w	#0, (GA_COMCMD0).l
+	jmp	(a2)
+	.align	2
+md_chain_tramp_end:
+.else
 	move.w	#900-1, d2
 1:
 	bsr	wait_vblank
@@ -604,6 +656,7 @@ movie_end_md:
 	move.l	#PALIDX_RAM, palidx_ptr		/* ループ再生: 切替表を先頭へ巻き戻す */
 	bsr	prime_fixed_cadence		/* 15s tail already satisfies frame0 cadence */
 	bra	play_loop
+.endif
 
 .ifdef MAIN_CODEGEN
 /* Emit the 256 straight-line bitmap handlers once into Main RAM.

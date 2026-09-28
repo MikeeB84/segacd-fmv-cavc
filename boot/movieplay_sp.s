@@ -397,6 +397,38 @@
 .equ STAT_READY, 0x8003
 .equ STAT_END,   0x8004			/* 全フレーム再生完了(MDは15秒待って CMD_STREAM 再送) */
 
+/* Multi-clip chaining (CLIP_CHAIN builds only). Every clip is a complete,
+   separately specialized player plus its own HEADER/BODY pair. At the end of
+   clip k the running player loads CLIPmmP.DAT for the next clip m, gives its
+   Main image to Main through Word RAM, overwrites its own resident image with
+   the next Sub image and enters that image's chain vector. */
+.equ CMD_CHAIN,  0x52			/* Main: ready to load the next clip */
+.equ STAT_CHAIN, 0x8005			/* Sub: next player file is in Main's bank */
+.ifdef CLIP_CHAIN
+.ifndef CLIP_INDEX
+.error "CLIP_CHAIN requires CLIP_INDEX"
+.endif
+.ifndef CLIP_COUNT
+.error "CLIP_CHAIN requires CLIP_COUNT"
+.endif
+.if (CLIP_INDEX < 1) || (CLIP_INDEX > CLIP_COUNT) || (CLIP_COUNT > 99)
+.error "CLIP_INDEX must be 1..CLIP_COUNT and CLIP_COUNT at most 99"
+.endif
+.equ CLIP_NEXT, (CLIP_INDEX % CLIP_COUNT) + 1
+/* Boot-phase PRG staging for the next player file. At movie end the PrgBuf
+   ring is idle, so both the file and the small copy loop live inside it,
+   far from the resident image at 0x6000..0x73FF. */
+.equ CHAIN_STAGE,       0x00040000
+.equ CHAIN_STAGE_MAX_SEC, 16
+.equ CHAIN_TRAMP,       0x0003FF00
+.equ CHAIN_MAGIC,       0x43415650	/* "CAVP" */
+.equ CHAIN_VERSION,     1
+.equ CHAIN_SP_MAX,      0x00001400	/* 0x6000..0x73FF */
+.if (CHAIN_TRAMP < 0x0000D800) || (CHAIN_STAGE+CHAIN_STAGE_MAX_SEC*0x800 > 0x00067000)
+.error "chain stage must stay inside the idle PrgBuf ring below ISO_BUF"
+.endif
+.endif
+
 .macro BIOSCALL code
 	move.w	#\code, d0
 	jsr	CDBIOS
@@ -420,6 +452,23 @@ sp_jmptbl:
 	.word	sp_int2-sp_jmptbl
 	.word	sp_user-sp_jmptbl
 	.word	0
+
+.ifdef CLIP_CHAIN
+	/* The BIOS resolves the interrupt user calls once, from the image it
+	   booted. A chained image replaces that image in place, so these two
+	   handlers and the chain vector must sit at the same address in every
+	   clip's build. */
+	.org	sp_header+0x2A		/* .org fails if the table ever grows */
+.global sp_int2
+sp_int2:
+	rts
+.global sp_user
+sp_user:
+	rts
+	.org	sp_header+0x2E
+sp_chain_vec:
+	bra.w	sp_chain_entry
+.endif
 
 .global sp_init
 sp_init:
@@ -460,6 +509,7 @@ do_stream:
 	BIOSCALL BIOS_CDB_STAT
 	andi.b	#0xF0, (CDB_STAT).w
 	bne	1b
+lookup_files:
 	bsr	init_iso9660
 	lea	file_header, a0
 	bsr	find_file		/* d0=LBA, d1=sector count */
@@ -1154,10 +1204,120 @@ movie_end:
 	bne	2b
 	move.w	#0, (COMSTAT0).l
 	move.b	#0xFF, (PCM_ONOFF).l		/* 全chオフ(静音) */
+.ifdef CLIP_CHAIN
+	bra	chain_next
+.else
 3:
 	cmp.w	#CMD_STREAM, (COMCMD0).l	/* MDの再開指示を待つ */
 	bne	3b
 	bra	stream_start
+.endif
+
+.ifdef CLIP_CHAIN
+/* Load the next clip's player. Main asks with CMD_CHAIN after its optional
+   end hold. The whole player file is staged in the idle PrgBuf ring, copied
+   into Sub's Word-RAM bank and handed to Main. Main copies its image out and
+   clears CMD_CHAIN; only then may Sub overwrite its own resident image. */
+chain_next:
+	BIOSCALL BIOS_CDC_STOP
+1:
+	cmp.w	#CMD_CHAIN, (COMCMD0).l
+	bne.s	1b
+	clr.w	(COMSTAT1).l
+	clr.w	(COMSTAT2).l
+	bsr	init_iso9660
+	lea	file_next_player, a0
+	bsr	find_file			/* d0=LBA, d1=sector count */
+	move.w	#0xBAD5, d2
+	tst.l	d1
+	beq	chain_bad
+	cmpi.l	#CHAIN_STAGE_MAX_SEC, d1
+	bhi	chain_bad
+	move.l	d1, d7
+	lea	CHAIN_STAGE, a0
+	bsr	read_cd
+	lea	CHAIN_STAGE, a0
+	addq.w	#1, d2				/* 0xBAD6: wrong file or clip */
+	cmpi.l	#CHAIN_MAGIC, (a0)
+	bne	chain_bad
+	cmpi.l	#(CHAIN_VERSION<<16)|CLIP_NEXT, 4(a0)
+	bne	chain_bad
+	cmpi.w	#CLIP_COUNT, 8(a0)
+	bne	chain_bad
+	addq.w	#1, d2				/* 0xBAD7: image bounds */
+	move.l	d7, d0
+	moveq	#11, d1
+	lsl.l	d1, d0				/* staged bytes */
+	move.l	16(a0), d1			/* sp_bytes */
+	beq	chain_bad
+	cmpi.l	#CHAIN_SP_MAX, d1
+	bhi	chain_bad
+	add.l	12(a0), d1
+	cmp.l	d0, d1
+	bhi	chain_bad
+	move.l	24(a0), d1			/* ip_bytes */
+	beq	chain_bad
+	add.l	20(a0), d1
+	cmp.l	d0, d1
+	bhi	chain_bad
+	/* Copy the complete staged file into Sub's bank; Main reads its header
+	   and image at the same offsets. */
+	lea	(SUB_BANK_1M).l, a1
+	lsl.l	#8, d7
+	add.l	d7, d7				/* sectors -> longs */
+	subq.w	#1, d7
+1:
+	move.l	(a0)+, (a1)+
+	dbra	d7, 1b
+	bchg	#0, (MEMMODE+1).l
+	bsr	swap_settle
+	move.w	#STAT_CHAIN, (COMSTAT0).l
+1:
+	cmp.w	#CMD_CHAIN, (COMCMD0).l		/* Main clears it after its copy */
+	beq.s	1b
+	clr.w	(COMSTAT0).l
+	/* The copy loop must run outside the image it overwrites. */
+	lea	sp_chain_tramp, a0
+	lea	(CHAIN_TRAMP).l, a1
+	move.w	#(sp_chain_tramp_end-sp_chain_tramp)/2-1, d0
+1:
+	move.w	(a0)+, (a1)+
+	dbra	d0, 1b
+	lea	CHAIN_STAGE, a0
+	jmp	(CHAIN_TRAMP).l
+chain_bad:
+	move.w	d2, (COMSTAT1).l
+	bra.s	chain_bad
+
+/* Position-independent: copied to CHAIN_TRAMP. a0 = staged player file. */
+sp_chain_tramp:
+	move.w	#0x2700, sr
+	move.l	12(a0), d0
+	lea	(a0,d0.l), a2
+	move.l	16(a0), d1
+	addq.l	#3, d1
+	lsr.l	#2, d1
+	subq.w	#1, d1
+	lea	(sp_header).l, a1
+1:
+	move.l	(a2)+, (a1)+
+	dbra	d1, 1b
+	jmp	(sp_chain_vec).l
+	.align	2
+sp_chain_tramp_end:
+
+/* Entered from the previous clip's player with CD reads stopped, 1M Word RAM
+   mode active and Main already running this clip's Main image. Drive
+   initialization and the Word-RAM mode setup from the boot path stay valid. */
+sp_chain_entry:
+	movea.l	#SP_STACK, sp
+	move.w	#0x2000, sr
+1:
+	cmp.w	#CMD_STREAM, (COMCMD0).l
+	bne.s	1b
+	move.w	#CMD_STREAM, (COMSTAT0).l
+	bra	lookup_files
+.endif
 
 /* Start one finite ISO file read. d0=absolute LBA, d1=sector count.  The caller
    establishes base_msf/prev_msf first so the very first sector is verifiable.
@@ -2912,19 +3072,38 @@ wwc_done:
 	movem.l	(sp)+, d0-d5/a0-a1
 	rts
 
+.ifndef CLIP_CHAIN
 .global sp_int2
 sp_int2:
 	rts
 .global sp_user
 sp_user:
 	rts
+.endif
 
 drv_init_tracklist:
 	.byte	1, 0xFF
+.ifdef CLIP_CHAIN
+/* ISO level-1 names CLIPnnH.DAT / CLIPnnB.DAT / CLIPnnP.DAT. find_file matches
+   a substring of the root directory, so the full name keeps nn unique. */
+file_header:
+	.ascii	"CLIP"
+	.byte	'0'+(CLIP_INDEX/10), '0'+(CLIP_INDEX%10)
+	.asciz	"H.DAT"
+file_body:
+	.ascii	"CLIP"
+	.byte	'0'+(CLIP_INDEX/10), '0'+(CLIP_INDEX%10)
+	.asciz	"B.DAT"
+file_next_player:
+	.ascii	"CLIP"
+	.byte	'0'+(CLIP_NEXT/10), '0'+(CLIP_NEXT%10)
+	.asciz	"P.DAT"
+.else
 file_header:
 	.asciz	"HEADER.DAT"
 file_body:
 	.asciz	"BODY.DAT"
+.endif
 	.align	2
 
 bios_packet:

@@ -134,7 +134,9 @@ def main() -> int:
 
     # Contract 1: no batched wave write survives anywhere in the writer.
     writer_start = text.index("write_wave_chunk:")
-    writer_end = text.index("sp_int2:")
+    # Chained builds also place sp_int2 near the module header; take the
+    # definition that follows the writer.
+    writer_end = text.index("sp_int2:", writer_start)
     writer = re.sub(r"/\*.*?\*/", "", text[writer_start:writer_end], flags=re.S)
     if "movep" in writer.lower():
         print("FAIL  write_wave_chunk contains a MOVEP; that batches strobes "

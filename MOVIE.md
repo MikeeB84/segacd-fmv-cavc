@@ -553,6 +553,41 @@ Audio is always checkpointed IMA ADPCM. Each chunk begins with `s16 predictor`,
 per sample. Sub decodes exactly `audio_bytes` samples into its PRG-RAM work
 buffer.
 
+## Multi-clip discs
+
+A multi-clip disc (`tools/build_chain.py`) carries three files per clip `nn`
+(`01`..`99`) instead of one `HEADER.DAT` / `BODY.DAT` pair:
+
+| File | Contents |
+|---|---|
+| `CLIPnnH.DAT` | that clip's `HEADER.DAT`, unchanged |
+| `CLIPnnB.DAT` | that clip's `BODY.DAT`, unchanged |
+| `CLIPnnP.DAT` | that clip's specialized player images |
+
+The disc system area holds clip 1's boot image. `CLIPnnP.DAT` is at most 16
+sectors. Its first sector starts with a 36-byte big-endian header; the rest of
+that sector is zero:
+
+| Offset | Size | Value |
+|---:|---:|---|
+| 0 | 4 | magic `CAVP` |
+| 4 | 2 | version, `1` |
+| 6 | 2 | clip index `nn` |
+| 8 | 2 | clip count |
+| 10 | 2 | reserved, `0` |
+| 12 | 4 | Sub image offset in the file, `0x800` |
+| 16 | 4 | Sub image bytes, at most `0x1400` |
+| 20 | 4 | Main image offset, the next sector boundary after the Sub image |
+| 24 | 4 | Main image bytes, at most `0x4A00` |
+| 28 | 4 | `ip_entry` offset inside the Main image |
+| 32 | 4 | Sub chain vector offset inside the Sub image, `0x2E` |
+
+The Sub image is the linked `movieplay_sp.bin`, loaded at Sub PRG `0x6000`.
+The Main image is the linked `movieplay_ip.bin`, loaded at Main `0xFF0000`.
+Each image is zero-padded to a sector boundary. The previous clip's player
+checks the magic, version, clip index, clip count, and both bounds before it
+uses the file.
+
 ## Player reconstruction
 
 Sub copies exactly `total_len` bytes from the APPLY ring into Word RAM and
@@ -1074,6 +1109,39 @@ Dic runはslotとdictionary indexの両方が連続しなければ分割しま�
 audioは常にcheckpointed IMA ADPCMです。chunk先頭に `s16 predictor`、
 `u8 step_index`、reserved zero byteを置き、sampleごとにlow-nibble-first codeを
 続けます。SubはPRG-RAM work bufferへ正確に `audio_bytes` sampleをdecodeします。
+
+## 複数clip disc
+
+複数clip disc (`tools/build_chain.py`) は、1組の `HEADER.DAT` / `BODY.DAT` の代わりに
+clip `nn` (`01`..`99`) ごとに3つのfileを持ちます。
+
+| File | 内容 |
+|---|---|
+| `CLIPnnH.DAT` | そのclipの `HEADER.DAT` (無変更) |
+| `CLIPnnB.DAT` | そのclipの `BODY.DAT` (無変更) |
+| `CLIPnnP.DAT` | そのclip専用のspecialized player image |
+
+disc system areaはclip 1のboot imageを持ちます。`CLIPnnP.DAT` は最大16 sectorです。
+先頭sectorは36 byteのbig-endian headerで始まり、sectorの残りは0です。
+
+| Offset | Size | Value |
+|---:|---:|---|
+| 0 | 4 | magic `CAVP` |
+| 4 | 2 | version、`1` |
+| 6 | 2 | clip index `nn` |
+| 8 | 2 | clip数 |
+| 10 | 2 | reserved、`0` |
+| 12 | 4 | file内のSub image offset、`0x800` |
+| 16 | 4 | Sub image byte数、最大 `0x1400` |
+| 20 | 4 | Main image offset。Sub imageの次のsector境界 |
+| 24 | 4 | Main image byte数、最大 `0x4A00` |
+| 28 | 4 | Main image内の `ip_entry` offset |
+| 32 | 4 | Sub image内のSub chain vector offset、`0x2E` |
+
+Sub imageはlink済み `movieplay_sp.bin` で、Sub PRG `0x6000` へloadします。
+Main imageはlink済み `movieplay_ip.bin` で、Main `0xFF0000` へloadします。
+各imageはsector境界まで0でpaddingします。前のclipのplayerは、fileを使う前に
+magic、version、clip index、clip数、両imageの範囲を検査します。
 
 ## Playerでの再構築
 

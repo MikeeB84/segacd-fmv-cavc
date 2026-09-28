@@ -306,6 +306,48 @@ sequenceDiagram
 Frame -1 is a player/HUD state only. It does not add a sim frame, a control
 block, a routing entry, or a HUD TSV row.
 
+### Clip chaining
+
+A multi-clip disc (`tools/build_chain.py`) assembles every clip's player with
+`CLIP_CHAIN`, `CLIP_INDEX`, and `CLIP_COUNT`. These builds read
+`CLIPnnH.DAT` / `CLIPnnB.DAT` instead of `HEADER.DAT` / `BODY.DAT` and change
+only the end of a clip; startup and timed playback are the sequences above.
+
+| Name | Address | Contents |
+|---|---|---|
+| `SP-INT` | Sub `0x0602A..0x0602D` | `sp_int2` and `sp_user`, fixed in every chained build because the BIOS resolves them once from the booted image |
+| `SP-CHAIN` | Sub `0x0602E` | `bra.w` to the Sub chain entry |
+| `CHAIN-TRAMP` | Sub `0x3FF00..` | Sub copy loop that overwrites `SP-RES`; inside the idle PrgBuf ring |
+| `CHAIN-STAGE` | Sub `0x40000..0x47FFF` | staged next-clip player file, at most 16 sectors |
+| `M-CHAIN` | Main `0xFF9000..` | Main copy loop that overwrites the IP image; inside `M-FREE` |
+
+```mermaid
+sequenceDiagram
+    participant S as Sub CPU
+    participant W as Word RAM 1M/1M
+    participant M as Main CPU
+
+    S-->>M: STAT_END after the final frame swap
+    S->>S: PCM off, CDC_STOP
+    Note over M: Final clip only: hold the last frame for 15 s
+    M->>S: CMD_CHAIN
+    S->>S: Read CLIPmmP.DAT (next clip m) into CHAIN-STAGE
+    S->>W: Copy the file into Sub's bank and exchange banks
+    S-->>M: STAT_CHAIN
+    M->>M: Copy the new IP image to 0xFF0000 from M-CHAIN
+    M->>S: Clear CMD_CHAIN
+    M->>M: Enter the new ip_entry
+    S->>S: Copy the new SP image to 0x6000 from CHAIN-TRAMP
+    S->>S: Enter SP-CHAIN, wait for CMD_STREAM
+    M->>S: CMD_STREAM
+    Note over S,M: Normal startup from the ISO lookup onward
+```
+
+The Sub chain entry skips drive initialization and the Word-RAM mode setup,
+which remain valid from boot. It repeats the ISO directory lookup for its own
+clip files, then enters the replay startup path. The final clip loads clip 1's
+`CLIP01P.DAT`, so the disc loops.
+
 ### Timed playback
 
 On every generic and specialized path, Main returns the consumed Word
@@ -742,6 +784,48 @@ sequenceDiagram
 
 frame -1はplayer/HUDだけのstateです。sim frame、control block、routing
 entry、HUD TSV rowは追加しません。
+
+### Clip chaining
+
+複数clip disc (`tools/build_chain.py`) は各clipのplayerを `CLIP_CHAIN`、
+`CLIP_INDEX`、`CLIP_COUNT` 付きでassembleします。このbuildは `HEADER.DAT` /
+`BODY.DAT` の代わりに `CLIPnnH.DAT` / `CLIPnnB.DAT` を読み、clip終端だけが
+変わります。startupとtimed playbackは上のsequenceと同じです。
+
+| Name | Address | Contents |
+|---|---|---|
+| `SP-INT` | Sub `0x0602A..0x0602D` | `sp_int2` と `sp_user`。BIOSは起動imageから一度だけ解決するため、全chained buildで固定 |
+| `SP-CHAIN` | Sub `0x0602E` | Sub chain entryへの `bra.w` |
+| `CHAIN-TRAMP` | Sub `0x3FF00..` | `SP-RES` を上書きするSub copy loop。idleなPrgBuf ring内 |
+| `CHAIN-STAGE` | Sub `0x40000..0x47FFF` | 次clipのplayer file。最大16 sector |
+| `M-CHAIN` | Main `0xFF9000..` | IP imageを上書きするMain copy loop。`M-FREE` 内 |
+
+```mermaid
+sequenceDiagram
+    participant S as Sub CPU
+    participant W as Word RAM 1M/1M
+    participant M as Main CPU
+
+    S-->>M: 最終frame swap後のSTAT_END
+    S->>S: PCM off、CDC_STOP
+    Note over M: 最後のclipだけ最終frameを15秒保持
+    M->>S: CMD_CHAIN
+    S->>S: CLIPmmP.DAT (次clip m) をCHAIN-STAGEへread
+    S->>W: fileをSub bankへcopyしbank交換
+    S-->>M: STAT_CHAIN
+    M->>M: M-CHAINから新IP imageを0xFF0000へcopy
+    M->>S: CMD_CHAINをclear
+    M->>M: 新しいip_entryへ入る
+    S->>S: CHAIN-TRAMPから新SP imageを0x6000へcopy
+    S->>S: SP-CHAINへ入りCMD_STREAMを待つ
+    M->>S: CMD_STREAM
+    Note over S,M: ISO lookup以降は通常のstartup
+```
+
+Sub chain entryはdrive初期化とWord-RAM mode設定を省きます。どちらもboot時の
+状態が有効なままです。自分のclip fileのためにISO directory lookupをやり直し、
+replay startup pathへ入ります。最後のclipはclip 1の `CLIP01P.DAT` を読むため、
+discはloopします。
 
 ### Timed playback
 

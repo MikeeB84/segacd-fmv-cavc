@@ -18,7 +18,7 @@ PYTHON ?= tools/python.sh
 ifeq ($(strip $(MAKECMDGOALS)),)
 MOVIEPLAY_REQUESTED := all
 else
-MOVIEPLAY_REQUESTED := $(filter all disc movieplay movieplay-internal test1m,$(MAKECMDGOALS))
+MOVIEPLAY_REQUESTED := $(filter all disc movieplay movieplay-internal chain-part chain-part-internal test1m,$(MAKECMDGOALS))
 endif
 ifneq ($(strip $(MOVIEPLAY_REQUESTED)),)
 ifeq ($(strip $(CONFIG)),)
@@ -70,12 +70,14 @@ AS := $(M68K_PREFIX)as
 CC := $(M68K_PREFIX)gcc
 LD := $(M68K_PREFIX)ld
 OBJCOPY := $(M68K_PREFIX)objcopy
+NM := $(M68K_PREFIX)nm
 MKISOFS := $(shell command -v mkisofs 2>/dev/null || command -v genisoimage 2>/dev/null || true)
 
 ASFLAGS := -m68000 --register-prefix-optional --bitwise-or
 CFLAGS_M68K := -m68000 -ffreestanding -fno-builtin -fomit-frame-pointer -O2 -Wall -Wextra
 LDFLAGS := -nostdlib --oformat binary
 
+.PHONY: chain-part chain-part-internal
 .PHONY: all disc setup movieplay-setup clean check-tools test1m cdcbench fontbench still256 movieplay movieplay-internal moviepack dmabench cpuvrambench streamtest pcmtest adpcmtest upscaletest asictest prgtest movieplay-force
 
 all: disc
@@ -326,6 +328,12 @@ MAIN_CODEGEN ?= 1
 # Bind player hot constants to this profile's HEADER.DAT.  Set to 0 only for
 # the generic runtime-header reference player used in A/B diagnostics.
 PLAYER_SPECIALIZE ?= 1
+# Multi-clip discs (tools/build_chain.py): CLIP_COUNT>0 builds this profile's
+# player as clip CLIP_INDEX of CLIP_COUNT. It reads CLIPnnH/B.DAT instead of
+# HEADER/BODY.DAT and loads the next clip's CLIPnnP.DAT at its end.
+CLIP_INDEX ?= 0
+CLIP_COUNT ?= 0
+CHAIN_ASFLAGS := $(if $(filter-out 0,$(CLIP_COUNT)),--defsym CLIP_CHAIN=1 --defsym CLIP_INDEX=$(CLIP_INDEX) --defsym CLIP_COUNT=$(CLIP_COUNT))
 # DEBUG changes assembler flags without changing a source timestamp. Force this
 # small object to rebuild so `make disc DEBUG=1` can never reuse a release object
 # (or vice versa).
@@ -358,7 +366,7 @@ $(MOVIEPLAY_DEBUG_FONT): tools/gen_debugfont.py | movieplay-setup
 
 $(MOVIEPLAY_BUILD_DIR)/movieplay_ip.o: $(BOOT_DIR)/movieplay_ip.s $(MOVIEPLAY_SECURITY) $(MOVIEPLAY_REGION_INC) $(MOVIEPLAY_STREAM_DIR)/paltab.bin $(MOVIEPLAY_STREAM_DIR)/palidx.bin $(PLAYER_CONSTANTS) $(SP_EXTENSION_CONSTANTS) $(MOVIEPLAY_DEBUG_FONT) tools/av_config.py tools/cavc_routing.py tools/ima_adpcm.py tools/sp_extension.py tools/check_player_ring.py $(CONFIG) movieplay-force | movieplay-setup
 	$(PYTHON) tools/check_player_ring.py --constants $(PLAYER_CONSTANTS) --extension $(SP_EXTENSION_BIN) --extension-constants $(SP_EXTENSION_CONSTANTS) $(if $(filter 1,$(ISO_VERIFY_SP_TAIL)),--sp-tail-marker)
-	$(AS) $(ASFLAGS) $(if $(filter 1,$(DEBUG)),--defsym DEBUG=1) $(if $(filter 1,$(MAIN_CODEGEN)),--defsym MAIN_CODEGEN=1) $(if $(filter 1,$(PLAYER_SPECIALIZE)),--defsym PLAYER_SPECIALIZED=1) -I$(MOVIEPLAY_BUILD_DIR) -I$(MOVIEPLAY_STREAM_DIR) -I$(BOOT_DIR) $< -o $@
+	$(AS) $(ASFLAGS) $(if $(filter 1,$(DEBUG)),--defsym DEBUG=1) $(if $(filter 1,$(MAIN_CODEGEN)),--defsym MAIN_CODEGEN=1) $(if $(filter 1,$(PLAYER_SPECIALIZE)),--defsym PLAYER_SPECIALIZED=1) $(CHAIN_ASFLAGS) -I$(MOVIEPLAY_BUILD_DIR) -I$(MOVIEPLAY_STREAM_DIR) -I$(BOOT_DIR) $< -o $@
 
 $(BOOT_DIR)/dbgfont.bin: tools/gen_debugfont.py
 	$(PYTHON) tools/gen_debugfont.py
@@ -376,7 +384,7 @@ $(MOVIEPLAY_BUILD_DIR)/movieplay_sp.o: $(BOOT_DIR)/movieplay_sp.s $(PLAYER_CONST
 	$(PYTHON) tools/check_player_ring.py --constants $(PLAYER_CONSTANTS) --extension $(SP_EXTENSION_BIN) --extension-constants $(SP_EXTENSION_CONSTANTS) $(if $(filter 1,$(ISO_VERIFY_SP_TAIL)),--sp-tail-marker)
 	$(PYTHON) harness/pcm_write_pacing/check_pacing.py
 	$(if $(filter 1,$(ISO_VERIFY_SP_TAIL)),$(PYTHON) harness/sp_tail_marker/verify_profile.py --header $(MOVIEPLAY_STREAM_DIR)/HEADER.DAT --max-pending-sectors 2)
-	$(AS) $(ASFLAGS) $(if $(filter 1,$(DEBUG)),--defsym DEBUG=1) $(if $(filter-out 0,$(ISO_HOLD_N)),--defsym ISO_HOLD_N=$(ISO_HOLD_N)) $(if $(filter 1,$(ISO_VERIFY_SP_TAIL)),--defsym ISO_VERIFY_SP_TAIL=1) $(if $(filter 1,$(PLAYER_SPECIALIZE)),--defsym PLAYER_SPECIALIZED=1) -I$(MOVIEPLAY_STREAM_DIR) -I$(MOVIEPLAY_BUILD_DIR) -I$(BOOT_DIR) $< -o $@
+	$(AS) $(ASFLAGS) $(if $(filter 1,$(DEBUG)),--defsym DEBUG=1) $(if $(filter-out 0,$(ISO_HOLD_N)),--defsym ISO_HOLD_N=$(ISO_HOLD_N)) $(if $(filter 1,$(ISO_VERIFY_SP_TAIL)),--defsym ISO_VERIFY_SP_TAIL=1) $(if $(filter 1,$(PLAYER_SPECIALIZE)),--defsym PLAYER_SPECIALIZED=1) $(CHAIN_ASFLAGS) -I$(MOVIEPLAY_STREAM_DIR) -I$(MOVIEPLAY_BUILD_DIR) -I$(BOOT_DIR) $< -o $@
 
 $(MOVIEPLAY_BUILD_DIR)/movieplay_sp.bin: $(MOVIEPLAY_BUILD_DIR)/movieplay_sp.o
 	$(LD) $(LDFLAGS) -T $(CFG_DIR)/sp.ld -o $@ $<
@@ -406,6 +414,18 @@ $(MOVIEPLAY_ISO): $(MOVIEPLAY_BUILD_DIR)/movieplay_boot.bin $(MOVIEPLAY_STREAM_D
 	cp $(MOVIEPLAY_STREAM_DIR)/BODY.DAT $(MOVIEPLAY_DISC)/BODY.DAT
 	@rm -f $@ $(MOVIEPLAY_CUE)
 	$(MKISOFS) -iso-level 1 -G $< -pad -V "SCFMV_DLT" -o $@ $(MOVIEPLAY_DISC)
+
+# One clip of a multi-clip disc: pack and build this profile's boot image as
+# clip CLIP_INDEX of CLIP_COUNT, without staging a single-movie ISO.
+# tools/build_chain.py collects the parts and writes the disc.
+chain-part:
+	@test "$(CLIP_COUNT)" -gt 0 || (echo "chain-part needs CLIP_INDEX and CLIP_COUNT" && exit 1)
+	$(PYTHON) tools/resource_tokens.py run-stem --config "$(CONFIG)" -- \
+		$(MAKE) chain-part-internal
+
+chain-part-internal: check-tools $(MOVIEPLAY_BUILD_DIR)/movieplay_boot.bin
+	$(NM) $(MOVIEPLAY_BUILD_DIR)/movieplay_ip.o | awk '$$3 == "ip_entry" { print $$1 }' > $(MOVIEPLAY_BUILD_DIR)/ip_entry.sym
+	@test -s $(MOVIEPLAY_BUILD_DIR)/ip_entry.sym || (echo "ip_entry symbol missing" && exit 1)
 
 $(MOVIEPLAY_CUE): $(MOVIEPLAY_ISO)
 	@rm -f $@
